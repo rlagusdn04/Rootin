@@ -1,0 +1,1 @@
+get_connection_point
