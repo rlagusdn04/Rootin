@@ -2,508 +2,646 @@ import tkinter as tk
 from tkinter import ttk, simpledialog, messagebox
 import json, os, math, copy
 
-# =======================
-# JSON 관련 함수 및 전역 데이터
-# =======================
-JSON_FILE = "tree_data.json"
-
-def load_tree():
-    if os.path.exists(JSON_FILE):
-        try:
-            with open(JSON_FILE, "r", encoding="utf-8") as file:
-                data = json.load(file)
-                # 모든 노드에 memo 필드가 없는 경우 추가
-                def ensure_memo(node):
-                    if "memo" not in node:
-                        node["memo"] = ""
-                    for child in node.get("children", []):
-                        ensure_memo(child)
-                ensure_memo(data)
-                return data
-        except json.JSONDecodeError:
-            messagebox.showerror("오류", "JSON 파일 형식 오류")
-            return {"name": "루트", "memo": "", "children": []}
-    else:
-        return {"name": "루트", "memo": "", "children": []}
-
-def save_tree(data):
-    with open(JSON_FILE, "w", encoding="utf-8") as file:
-        json.dump(data, file, indent=4, ensure_ascii=False)
-
-tree_data = load_tree()
-
-# =======================
-# Undo/Redo 기능
-# =======================
-undo_stack = []
-redo_stack = []
-
-def push_undo():
-    global undo_stack, redo_stack, tree_data
-    undo_stack.append(copy.deepcopy(tree_data))
-    redo_stack.clear()
-
-def undo():
-    global tree_data, undo_stack, redo_stack
-    if undo_stack:
-        redo_stack.append(copy.deepcopy(tree_data))
-        tree_data = undo_stack.pop()
-        refresh_canvas()
-        refresh_treeview()
-    else:
-        messagebox.showinfo("Undo", "더 이상 실행 취소할 내용이 없습니다.")
-
-def redo():
-    global tree_data, undo_stack, redo_stack
-    if redo_stack:
-        undo_stack.append(copy.deepcopy(tree_data))
-        tree_data = redo_stack.pop()
-        refresh_canvas()
-        refresh_treeview()
-    else:
-        messagebox.showinfo("Redo", "더 이상 재실행할 내용이 없습니다.")
-
-# =======================
-# 헬퍼 함수: 부모 찾기, 리프 노드 계산
-# =======================
-def get_parent(root, target):
-    if root is target:
-        return None
-    for child in root.get("children", []):
-        if child is target:
-            return root
-        parent = get_parent(child, target)
-        if parent:
-            return parent
-    return None
-
-def count_leaves(node):
-    if not node.get("children"):
-        return 1
-    return sum(count_leaves(child) for child in node["children"])
-
-# =======================
-# 전역 변수 (Canvas 관련)
-# =======================
-canvas_node_map = {}  # {canvas_item_id: node_ref}
-canvas_plus_map = {}  # {plus_item_id: node_ref}
-arrow_map = {}        # {(parent_id, child_id): line_id}
-
-drag_data = {
-    "node": None,           # 드래그 중인 노드의 JSON 데이터
-    "start_x": 0,
-    "start_y": 0,
-    "dragging": False,
-}
-
-# =======================
-# 유틸리티 함수들
-# =======================
-def highlight_node(item):
-    # 필요시 구현
-    pass
-
-def clear_highlight():
-    # 필요시 구현
-    pass
-
-def show_context_menu(event):
-    item = event.widget.find_withtag("current")[0]
-    if item not in canvas_node_map:
-        return
-    node = canvas_node_map[item]
-    context_menu = tk.Menu(root, tearoff=0)
-    context_menu.add_command(label="메모 편집", command=lambda: open_memo_popup(node))
-    context_menu.add_command(label="노드 수정", command=lambda: rename_node(node))
-    if node is not tree_data:
-        context_menu.add_command(label="노드 삭제", command=lambda: delete_node(node))
-    context_menu.add_command(label="자식 추가", command=lambda: add_child_node(node))
-    context_menu.post(event.x_root, event.y_root)
-
-def rename_node(node):
-    new_name = simpledialog.askstring("노드 수정", "새로운 이름을 입력하세요:", initialvalue=node["name"])
-    if new_name:
-        push_undo()
-        node["name"] = new_name
-        save_tree(tree_data)
-        refresh_canvas()
-        refresh_treeview()
-
-def delete_node(node):
-    if node is tree_data:
-        messagebox.showwarning("삭제 불가", "루트 노드는 삭제할 수 없습니다.")
-        return
-    push_undo()
-    parent = get_parent(tree_data, node)
-    if parent:
-        try:
-            parent["children"].remove(node)
-        except ValueError:
-            pass
-        save_tree(tree_data)
-        refresh_canvas()
-        refresh_treeview()
-
-def add_child_node(node):
-    new_name = simpledialog.askstring("노드 추가", f"'{node['name']}' 노드에 추가할 자식 노드 이름:")
-    if new_name:
-        push_undo()
-        node.setdefault("children", []).append({"name": new_name, "memo": "", "children": []})
-        save_tree(tree_data)
-        refresh_canvas()
-        refresh_treeview()
-
-def open_memo_popup(node):
-    popup = tk.Toplevel(root)
-    popup.title(f"메모 편집 - {node['name']}")
-    text = tk.Text(popup, width=40, height=10)
-    text.pack(padx=10, pady=10)
-    text.insert(tk.END, node.get("memo", ""))
-    def save_and_close():
-        push_undo()
-        node["memo"] = text.get("1.0", tk.END).strip()
-        save_tree(tree_data)
-        popup.destroy()
-        refresh_treeview()
-    btn = tk.Button(popup, text="저장", command=save_and_close)
-    btn.pack(pady=5)
-
-def on_plus_click(event):
-    item = event.widget.find_withtag("current")[0]
-    node = canvas_plus_map.get(item)
-    if node:
-        open_memo_popup(node)
-
-def on_node_press(event):
-    current = event.widget.find_withtag("current")
-    if not current:
-        return
-    item = current[0]
-    if item not in canvas_node_map:
-        return
-    drag_data["node"] = canvas_node_map[item]
-    drag_data["start_x"] = event.x
-    drag_data["start_y"] = event.y
-    drag_data["dragging"] = False
-
-def on_node_motion(event):
-    if drag_data["node"] is None:
-        return
-    dx = event.x - drag_data["start_x"]
-    dy = event.y - drag_data["start_y"]
-    if math.sqrt(dx*dx + dy*dy) > 5:
-        drag_data["dragging"] = True
-        node_tag = f"node_{id(drag_data['node'])}"
-        vis_canvas.move(node_tag, dx, dy)
-        plus_tag = f"plus_{id(drag_data['node'])}"
-        vis_canvas.move(plus_tag, dx, dy)
-        drag_data["start_x"] = event.x
-        drag_data["start_y"] = event.y
-        # 노드의 좌표 업데이트
-        drag_data["node"]["x"] = drag_data["node"].get("x", 0) + dx
-        drag_data["node"]["y"] = drag_data["node"].get("y", 0) + dy
-        # 해당 노드와 연결된 화살표 업데이트
-        update_arrows(drag_data["node"])
-
-def on_node_release(event):
-    if drag_data["node"] is None:
-        return
-
-    if drag_data["dragging"]:
-        # 마우스 해제 위치에서 겹치는 캔버스 아이템 찾기
-        overlapping_items = vis_canvas.find_overlapping(event.x, event.y, event.x, event.y)
-        target_node = None
-        for item in overlapping_items:
-            if item in canvas_node_map:
-                candidate = canvas_node_map[item]
-                # 자기 자신이나 자손은 제외하여 순환참조 방지
-                if candidate is not drag_data["node"] and not is_descendant(drag_data["node"], candidate):
-                    target_node = candidate
-                    break
-
-        if target_node:
-            push_undo()
-            # 기존 부모에서 제거
-            original_parent = get_parent(tree_data, drag_data["node"])
-            if original_parent:
-                try:
-                    original_parent["children"].remove(drag_data["node"])
-                except ValueError:
-                    pass
-            # 대상 노드의 자식으로 추가
-            target_node.setdefault("children", []).append(drag_data["node"])
-            save_tree(tree_data)
-            refresh_treeview()
-            refresh_canvas()
+# ============================
+# TreeModel: 데이터 및 Undo/Redo 관리
+# ============================
+class TreeModel:
+    def __init__(self, json_file="tree_data.json"):
+        self.json_file = json_file
+        self.tree_data = self.load_tree()
+        self.undo_stack = []
+        self.redo_stack = []
+    
+    def load_tree(self):
+        if os.path.exists(self.json_file):
+            try:
+                with open(self.json_file, "r", encoding="utf-8") as file:
+                    data = json.load(file)
+                    if isinstance(data, dict):
+                        data = [data]
+                    def ensure_memo(node):
+                        if "memo" not in node:
+                            node["memo"] = ""
+                        for child in node.get("children", []):
+                            ensure_memo(child)
+                    for node in data:
+                        ensure_memo(node)
+                    return data
+            except json.JSONDecodeError:
+                messagebox.showerror("오류", "JSON 파일 형식 오류")
+                return [{"name": "루트", "memo": "", "children": []}]
         else:
-            # 드롭 대상이 없으면 단순히 위치를 저장
-            save_tree(tree_data)
-    else:
-        # 단순 클릭: 자식 노드 추가 대화상자 실행
-        new_name = simpledialog.askstring("노드 추가", f"'{drag_data['node']['name']}' 노드에 추가할 자식 노드 이름:")
-        if new_name:
-            push_undo()
-            drag_data["node"].setdefault("children", []).append({"name": new_name, "memo": "", "children": []})
-            save_tree(tree_data)
-            refresh_treeview()
-            refresh_canvas()
-
-    drag_data["node"] = None
-    drag_data["dragging"] = False
-
-def on_node_right_click(event):
-    show_context_menu(event)
-
-def is_descendant(parent, candidate):
-    """candidate가 parent의 자손(포함)인지 재귀적으로 확인"""
-    if parent is candidate:
-        return True
-    for child in parent.get("children", []):
-        if is_descendant(child, candidate):
+            return [{"name": "루트", "memo": "", "children": []}]
+    
+    def save_tree(self):
+        with open(self.json_file, "w", encoding="utf-8") as file:
+            json.dump(self.tree_data, file, indent=4, ensure_ascii=False)
+    
+    def push_undo(self):
+        self.undo_stack.append(copy.deepcopy(self.tree_data))
+        self.redo_stack.clear()
+    
+    def undo(self):
+        if self.undo_stack:
+            self.redo_stack.append(copy.deepcopy(self.tree_data))
+            self.tree_data = self.undo_stack.pop()
             return True
-    return False
+        else:
+            messagebox.showinfo("Undo", "더 이상 실행 취소할 내용이 없습니다.")
+            return False
+    
+    def redo(self):
+        if self.redo_stack:
+            self.undo_stack.append(copy.deepcopy(self.tree_data))
+            self.tree_data = self.redo_stack.pop()
+            return True
+        else:
+            messagebox.showinfo("Redo", "더 이상 재실행할 내용이 없습니다.")
+            return False
 
-# =======================
-# 화살표 연결 관련 함수
-# =======================
-def get_connection_point(bbox, target_center):
-    """
-    bbox: (x1, y1, x2, y2) – 노드의 바운딩 박스
-    target_center: (x, y) – 연결할 대상 노드의 중심 좌표
-    리턴: bbox 경계와 중심을 잇는 선의 교차점 좌표
-    """
-    cx = (bbox[0] + bbox[2]) / 2
-    cy = (bbox[1] + bbox[3]) / 2
-    dx = target_center[0] - cx
-    dy = target_center[1] - cy
-    if dx == 0 and dy == 0:
-        return cx, cy
+    # 부모 노드 찾기 관련 메서드
+    def get_parent_recursive(self, node, target):
+        for child in node.get("children", []):
+            if child is target:
+                return node
+            p = self.get_parent_recursive(child, target)
+            if p:
+                return p
+        return None
 
-    half_width = (bbox[2] - bbox[0]) / 2
-    half_height = (bbox[3] - bbox[1]) / 2
+    def get_parent_in_forest(self, forest, target):
+        for node in forest:
+            if node is target:
+                return None
+            p = self.get_parent_recursive(node, target)
+            if p:
+                return p
+        return None
+    
+    def get_parent(self, target):
+        return self.get_parent_in_forest(self.tree_data, target)
+    
+    def count_leaves(self, node):
+        if not node.get("children"):
+            return 1
+        return sum(self.count_leaves(child) for child in node["children"])
 
-    factor_x = half_width / abs(dx) if dx != 0 else float('inf')
-    factor_y = half_height / abs(dy) if dy != 0 else float('inf')
-    factor = min(factor_x, factor_y)
+# ============================
+# TreeCanvas: 캔버스 및 노드 그리기/이벤트 처리, 패닝/줌 기능
+# ============================
+class TreeCanvas(tk.Canvas):
+    def __init__(self, master, model, trash_zone, **kwargs):
+        super().__init__(master, **kwargs)
+        self.model = model
+        self.trash_zone = trash_zone
+        self.current_scale = 1.0
+        self.canvas_node_map = {}   # {캔버스 항목 id: 노드 참조}
+        self.canvas_plus_map = {}   # {플러스 항목 id: 노드 참조}
+        self.arrow_map = {}         # {(부모 id, 자식 id): 선 id}
+        self.drag_data = {"node": None, "start_x": 0, "start_y": 0, "dragging": False}
+        self._panning = False  # 패닝 여부 플래그
 
-    return cx + dx * factor, cy + dy * factor
-
-def update_arrows(node):
-    """
-    부모와 자식 노드 사이의 화살표를, 노드의 현재 바운딩 박스 기반으로 업데이트
-    """
-    parent = get_parent(tree_data, node)
-    if parent:
-        key = (id(parent), id(node))
-        if key in arrow_map:
-            line_id = arrow_map[key]
-            parent_bbox = vis_canvas.bbox(f"node_{id(parent)}")
-            child_bbox = vis_canvas.bbox(f"node_{id(node)}")
-            if parent_bbox and child_bbox:
-                parent_center = ((parent_bbox[0] + parent_bbox[2]) / 2,
-                                 (parent_bbox[1] + parent_bbox[3]) / 2)
-                child_center = ((child_bbox[0] + child_bbox[2]) / 2,
-                                (child_bbox[1] + child_bbox[3]) / 2)
-                start_point = get_connection_point(parent_bbox, child_center)
-                end_point = get_connection_point(child_bbox, parent_center)
-                vis_canvas.coords(line_id, start_point[0], start_point[1],
-                                  end_point[0], end_point[1])
-    # 재귀적으로 자식 노드들에 대해서도 업데이트
-    for child in node.get("children", []):
-        update_arrows(child)
-
-# =======================
-# Canvas에 트리 그리기 – 노드와 화살표 생성
-# =======================
-def draw_tree(canvas, node, x, y):
-    # 노드에 좌표가 있으면 사용, 없으면 초기 좌표 할당
-    if "x" in node and "y" in node:
-        current_x, current_y = node["x"], node["y"]
-    else:
-        current_x, current_y = x, y
-        node["x"] = x
-        node["y"] = y
-
-    # 1. 노드 텍스트 그리기 (중심 정렬, 고유 태그 부여)
-    node_tag = f"node_{id(node)}"
-    node_text_id = canvas.create_text(current_x, current_y, text=node["name"],
-                                      font=("Arial", 12, "bold"),
+        # 노드 관련 이벤트는 태그("node_group")로 바인딩
+        self.bind_events()
+        self.bind("<MouseWheel>", self.zoom)
+        self.bind("<Button-4>", self.zoom)
+        self.bind("<Button-5>", self.zoom)
+        # 빈 공간에서의 패닝 처리 (Shift 없이)
+        self.bind("<ButtonPress-1>", self.on_canvas_press, add="+")
+        self.bind("<B1-Motion>", self.on_canvas_drag, add="+")
+        self.bind("<ButtonRelease-1>", self.on_canvas_release, add="+")
+    
+    def bind_events(self):
+        self.tag_bind("node_group", "<ButtonPress-1>", self.on_node_press)
+        self.tag_bind("node_group", "<B1-Motion>", self.on_node_motion)
+        self.tag_bind("node_group", "<ButtonRelease-1>", self.on_node_release)
+        self.tag_bind("node_group", "<Button-3>", self.on_node_right_click)
+    
+    def zoom(self, event):
+        if hasattr(event, 'delta'):
+            scale_factor = 1.1 if event.delta > 0 else 0.9
+        elif event.num == 4:
+            scale_factor = 1.1
+        elif event.num == 5:
+            scale_factor = 0.9
+        else:
+            return
+        x = self.canvasx(event.x)
+        y = self.canvasy(event.y)
+        self.scale("node_group", x, y, scale_factor, scale_factor)
+        self.scale("plus", x, y, scale_factor, scale_factor)
+        self.scale("arrow_line", x, y, scale_factor, scale_factor)
+        self.current_scale *= scale_factor
+        self.update_fonts()
+    
+    def update_fonts(self):
+        for item in self.find_withtag("node_group"):
+            if self.type(item) == "text":
+                new_font = ("Arial", max(1, int(12 * self.current_scale)), "bold")
+                self.itemconfig(item, font=new_font)
+        for item in self.find_withtag("plus"):
+            new_font = ("Arial", max(1, int(10 * self.current_scale)), "bold")
+            self.itemconfig(item, font=new_font)
+    
+    def refresh(self):
+        self.delete("all")
+        self.canvas_node_map.clear()
+        self.canvas_plus_map.clear()
+        self.arrow_map.clear()
+        # 최상위 노드들을 좌측에서 일정 간격으로 배치
+        start_x = 100
+        start_y = 50
+        gap = 150
+        for node in self.model.tree_data:
+            self.draw_tree(node, start_x, start_y)
+            start_x += gap
+        self.bind_events()
+        self.update_fonts()
+    
+    def draw_tree(self, node, x, y):
+        # 노드의 저장된 좌표가 있으면 사용, 없으면 기본값 사용
+        if "x" in node and "y" in node:
+            current_x, current_y = node["x"], node["y"]
+        else:
+            current_x, current_y = x, y
+            node["x"] = x
+            node["y"] = y
+        node_tag = f"node_{id(node)}"
+        base_font = ("Arial", max(1, int(12 * self.current_scale)), "bold")
+        node_text_id = self.create_text(current_x, current_y, text=node["name"],
+                                      font=base_font,
                                       fill="black", anchor="center",
                                       tags=("node_group", node_tag))
-    canvas.update_idletasks()
-    bbox = canvas.bbox(node_text_id)
-    pad_x, pad_y = 4, 2
-    # 2. 텍스트보다 약간 크게 사각형(박스) 그리기 (동일 태그 부여)
-    rect_id = canvas.create_rectangle(bbox[0]-pad_x, bbox[1]-pad_y, bbox[2]+pad_x, bbox[3]+pad_y,
+        self.update_idletasks()
+        bbox = self.bbox(node_text_id)
+        pad_x, pad_y = 4, 2
+        rect_id = self.create_rectangle(bbox[0]-pad_x, bbox[1]-pad_y, bbox[2]+pad_x, bbox[3]+pad_y,
                                       fill="white", outline="black",
                                       tags=("node_group", node_tag))
-    # 3. 텍스트를 사각형 위로 올림
-    canvas.tag_raise(node_text_id, rect_id)
-    
-    # 4. 텍스트와 사각형을 노드와 연결 (매핑)
-    canvas_node_map[node_text_id] = node
-    canvas_node_map[rect_id] = node
-
-    # 5. + 버튼 그리기 (노드 옆)
-    plus_margin = 8
-    plus_x = bbox[2] + plus_margin
-    plus_y = (bbox[1] + bbox[3]) / 2 - plus_margin
-    plus_tag = f"plus_{id(node)}"
-    plus_id = canvas.create_text(plus_x, plus_y, text="+",
-                                 font=("Arial", 10, "bold"),
+        self.tag_raise(node_text_id, rect_id)
+        self.canvas_node_map[node_text_id] = node
+        self.canvas_node_map[rect_id] = node
+        
+        # 플러스 아이콘 (메모 편집/자식 추가)
+        plus_margin = 8
+        plus_x = bbox[2] + plus_margin
+        plus_y = (bbox[1] + bbox[3]) / 2 - plus_margin
+        plus_tag = f"plus_{id(node)}"
+        plus_font = ("Arial", max(1, int(10 * self.current_scale)), "bold")
+        plus_id = self.create_text(plus_x, plus_y, text="+",
+                                 font=plus_font,
                                  fill="black", tags=("plus", plus_tag))
-    canvas_plus_map[plus_id] = node
-    canvas.tag_bind(plus_id, "<Button-1>", on_plus_click)
-
-    # 6. 자식 노드들을 재귀적으로 배치 및 부모-자식 연결 화살표 생성
-    children = node.get("children", [])
-    if children:
-        base_width = 80  # 자식들 간 간격
-        start_x = current_x - (len(children)-1) * base_width/2
-        child_y = current_y + 80
-        for child in children:
-            if "x" not in child or "y" not in child:
-                child["x"] = start_x
-                child["y"] = child_y
-            draw_tree(canvas, child, child["x"], child["y"])
-            parent_bbox = canvas.bbox(node_tag)
-            child_bbox = canvas.bbox(f"node_{id(child)}")
-            if parent_bbox and child_bbox:
-                # 초기 화살표는 단순 연결 (update_arrows 함수에서 재계산됨)
-                parent_center = ((parent_bbox[0]+parent_bbox[2]) / 2, parent_bbox[3])
-                child_top = ((child_bbox[0]+child_bbox[2]) / 2, child_bbox[1])
-                line_id = canvas.create_line(parent_center[0], parent_center[1],
-                                             child_top[0], child_top[1],
-                                             fill="gray", arrow=tk.LAST,
+        self.canvas_plus_map[plus_id] = node
+        self.tag_bind(plus_id, "<Button-1>", self.on_plus_click)
+        
+        # 자식 노드 그리기
+        children = node.get("children", [])
+        if children:
+            base_width = 80
+            start_x_child = current_x - (len(children)-1) * base_width/2
+            child_y = current_y + 80
+            for child in children:
+                if "x" not in child or "y" not in child:
+                    child["x"] = start_x_child
+                    child["y"] = child_y
+                self.draw_tree(child, child["x"], child_y)
+                parent_bbox = self.bbox(node_tag)
+                child_bbox = self.bbox(f"node_{id(child)}")
+                if parent_bbox and child_bbox:
+                    parent_center = ((parent_bbox[0] + parent_bbox[2]) / 2, parent_bbox[3])
+                    child_top = ((child_bbox[0] + child_bbox[2]) / 2, child_bbox[1])
+                    points = [parent_center[0], parent_center[1], child_top[0], child_top[1]]
+                    line_id = self.create_line(*points, fill="gray", arrow=tk.LAST,
                                              tags=("arrow_line", f"arrow_{id(node)}_{id(child)}"))
-                arrow_map[(id(node), id(child))] = line_id
-            start_x += base_width
+                    self.arrow_map[(id(node), id(child))] = line_id
+                start_x_child += base_width
+    
+    def on_plus_click(self, event):
+        current = self.find_withtag("current")
+        if not current:
+            return
+        item = current[0]
+        node = self.canvas_plus_map.get(item)
+        if node:
+            self.open_memo_popup(node)
+    
+    def open_memo_popup(self, node):
+        popup = tk.Toplevel(self)
+        popup.title(f"메모 편집 - {node['name']}")
+        text = tk.Text(popup, width=40, height=10)
+        text.pack(padx=10, pady=10)
+        text.insert(tk.END, node.get("memo", ""))
+        def save_and_close():
+            self.model.push_undo()
+            node["memo"] = text.get("1.0", tk.END).strip()
+            self.model.save_tree()
+            popup.destroy()
+        btn = tk.Button(popup, text="저장", command=save_and_close)
+        btn.pack(pady=5)
+    
+    # -------------------------
+    # 노드 드래그 이벤트 (노드 위에서 발생)
+    # -------------------------
+    def on_node_press(self, event):
+        current = self.find_withtag("current")
+        if not current:
+            return
+        item = current[0]
+        if item not in self.canvas_node_map:
+            return
+        self.drag_data["node"] = self.canvas_node_map[item]
+        self.drag_data["start_x"] = event.x
+        self.drag_data["start_y"] = event.y
+        self.drag_data["dragging"] = False
+        # 노드를 클릭하면 빈 공간 패닝은 취소
+        self._panning = False
+        return "break"
+    
+    def on_node_motion(self, event):
+        if self.drag_data["node"] is None:
+            return
+        dx = event.x - self.drag_data["start_x"]
+        dy = event.y - self.drag_data["start_y"]
+        if math.sqrt(dx*dx + dy*dy) > 5:
+            self.drag_data["dragging"] = True
+            node_tag = f"node_{id(self.drag_data['node'])}"
+            self.move(node_tag, dx, dy)
+            plus_tag = f"plus_{id(self.drag_data['node'])}"
+            self.move(plus_tag, dx, dy)
+            self.drag_data["start_x"] = event.x
+            self.drag_data["start_y"] = event.y
+            self.drag_data["node"]["x"] = self.drag_data["node"].get("x", 0) + dx
+            self.drag_data["node"]["y"] = self.drag_data["node"].get("y", 0) + dy
+            self.update_arrows(self.drag_data["node"])
+            # TrashZone 피드백
+            if self.trash_zone.is_near(event.x_root, event.y_root):
+                self.trash_zone.show_feedback()
+            else:
+                self.trash_zone.reset_feedback()
+        return "break"
+    
+    def on_node_release(self, event):
+        if self.drag_data["node"] is None:
+            return "break"
+        if self.drag_data["dragging"] and self.trash_zone.is_over(event.x_root, event.y_root):
+            self.model.push_undo()
+            parent = self.model.get_parent(self.drag_data["node"])
+            if parent is not None:
+                try:
+                    parent["children"].remove(self.drag_data["node"])
+                except ValueError:
+                    pass
+            else:
+                try:
+                    self.model.tree_data.remove(self.drag_data["node"])
+                except ValueError:
+                    pass
+            self.model.save_tree()
+            self.trash_zone.reset_feedback()
+            self.refresh()
+        elif self.drag_data["dragging"]:
+            overlapping_items = self.find_overlapping(event.x, event.y, event.x, event.y)
+            target_node = None
+            for item in overlapping_items:
+                if item in self.canvas_node_map:
+                    candidate = self.canvas_node_map[item]
+                    if candidate is not self.drag_data["node"] and not self.is_descendant(self.drag_data["node"], candidate):
+                        target_node = candidate
+                        break
+            if target_node:
+                self.model.push_undo()
+                original_parent = self.model.get_parent(self.drag_data["node"])
+                if original_parent is not None:
+                    try:
+                        original_parent["children"].remove(self.drag_data["node"])
+                    except ValueError:
+                        pass
+                target_node.setdefault("children", []).append(self.drag_data["node"])
+                self.model.save_tree()
+                self.refresh()
+            else:
+                self.model.save_tree()
+        else:
+            new_name = simpledialog.askstring("노드 추가", f"'{self.drag_data['node']['name']}' 노드에 추가할 자식 노드 이름:")
+            if new_name:
+                self.model.push_undo()
+                self.drag_data["node"].setdefault("children", []).append({"name": new_name, "memo": "", "children": []})
+                self.model.save_tree()
+                self.refresh()
+        self.drag_data["node"] = None
+        self.drag_data["dragging"] = False
+        self.trash_zone.reset_feedback()
+        return "break"
+    
+    def on_node_right_click(self, event):
+        current = self.find_withtag("current")
+        if not current:
+            return
+        item = current[0]
+        if item not in self.canvas_node_map:
+            return
+        node = self.canvas_node_map[item]
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="메모 편집", command=lambda: self.open_memo_popup(node))
+        menu.add_command(label="노드 수정", command=lambda: self.rename_node(node))
+        menu.add_command(label="노드 삭제", command=lambda: self.delete_node(node))
+        menu.add_command(label="자식 추가", command=lambda: self.add_child_node(node))
+        menu.post(event.x_root, event.y_root)
+        return "break"
+    
+    def rename_node(self, node):
+        new_name = simpledialog.askstring("노드 수정", "새로운 이름을 입력하세요:", initialvalue=node["name"])
+        if new_name:
+            self.model.push_undo()
+            node["name"] = new_name
+            self.model.save_tree()
+            self.refresh()
+    
+    def delete_node(self, node):
+        self.model.push_undo()
+        parent = self.model.get_parent(node)
+        if parent is not None:
+            try:
+                parent["children"].remove(node)
+            except ValueError:
+                pass
+        else:
+            try:
+                self.model.tree_data.remove(node)
+            except ValueError:
+                pass
+        self.model.save_tree()
+        self.refresh()
+    
+    def add_child_node(self, node):
+        new_name = simpledialog.askstring("노드 추가", f"'{node['name']}' 노드에 추가할 자식 노드 이름:")
+        if new_name:
+            self.model.push_undo()
+            node.setdefault("children", []).append({"name": new_name, "memo": "", "children": []})
+            self.model.save_tree()
+            self.refresh()
+    
+    def update_arrows(self, node):
+        parent = self.model.get_parent(node)
+        if parent:
+            key = (id(parent), id(node))
+            if key in self.arrow_map:
+                line_id = self.arrow_map[key]
+                parent_bbox = self.bbox(f"node_{id(parent)}")
+                child_bbox = self.bbox(f"node_{id(node)}")
+                if parent_bbox and child_bbox:
+                    parent_center = ((parent_bbox[0] + parent_bbox[2]) / 2,
+                                     (parent_bbox[1] + parent_bbox[3]) / 2)
+                    child_center = ((child_bbox[0] + child_bbox[2]) / 2,
+                                    (child_bbox[1] + child_bbox[3]) / 2)
+                    start_point = self.get_connection_point(parent_bbox, child_center)
+                    end_point = self.get_connection_point(child_bbox, parent_center)
+                    points = [start_point[0], start_point[1], end_point[0], end_point[1]]
+                    self.coords(line_id, *points)
+        for child in node.get("children", []):
+            self.update_arrows(child)
+    
+    def get_connection_point(self, bbox, target_center):
+        cx = (bbox[0] + bbox[2]) / 2
+        cy = (bbox[1] + bbox[3]) / 2
+        dx = target_center[0] - cx
+        dy = target_center[1] - cy
+        if dx == 0 and dy == 0:
+            return cx, cy
+        half_width = (bbox[2] - bbox[0]) / 2
+        half_height = (bbox[3] - bbox[1]) / 2
+        factor_x = half_width / abs(dx) if dx != 0 else float('inf')
+        factor_y = half_height / abs(dy) if dy != 0 else float('inf')
+        factor = min(factor_x, factor_y)
+        return cx + dx * factor, cy + dy * factor
+    
+    def is_descendant(self, parent, candidate):
+        if parent is candidate:
+            return True
+        for child in parent.get("children", []):
+            if self.is_descendant(child, candidate):
+                return True
+        return False
 
-def bind_node_group_events(canvas):
-    canvas.tag_bind("node_group", "<ButtonPress-1>", on_node_press)
-    canvas.tag_bind("node_group", "<B1-Motion>", on_node_motion)
-    canvas.tag_bind("node_group", "<ButtonRelease-1>", on_node_release)
-    canvas.tag_bind("node_group", "<Button-3>", on_node_right_click)
+    # -------------------------
+    # 캔버스 빈 공간에서의 패닝 처리 (노드가 없으면 패닝)
+    # -------------------------
+    def on_canvas_press(self, event):
+        # 현재 "current" 항목이 있다면 (노드나 플러스 등) 패닝을 진행하지 않음
+        current = self.find_withtag("current")
+        if current:
+            tags = self.gettags(current[0])
+            if "node_group" in tags or "plus" in tags:
+                self._panning = False
+                return "break"
+        self._panning = True
+        self.scan_mark(event.x, event.y)
+        return "break"
+    
+    def on_canvas_drag(self, event):
+        if self._panning:
+            self.scan_dragto(event.x, event.y, gain=1)
+            return "break"
+    
+    def on_canvas_release(self, event):
+        self._panning = False
+        return "break"
 
-def refresh_canvas():
-    vis_canvas.delete("all")
-    canvas_node_map.clear()
-    canvas_plus_map.clear()
-    arrow_map.clear()
-    width = vis_canvas.winfo_width() or 800
-    # 루트 노드 좌표가 있으면 사용, 없으면 중앙에 배치
-    root_x = tree_data.get("x", width//2)
-    root_y = tree_data.get("y", 50)
-    draw_tree(vis_canvas, tree_data, root_x, root_y)
-    bind_node_group_events(vis_canvas)
+# ============================
+# TrashZone: 삭제 영역 (노드 드래그 시 피드백 제공)
+# ============================
+class TrashZone:
+    def __init__(self, master, x, y, default_size=(50, 50), expanded_size=(100, 100)):
+        self.master = master
+        self.x, self.y = x, y
+        self.default_size = default_size
+        self.expanded_size = expanded_size
+        # 프레임에 border와 relief를 주어 영역이 확실히 보이도록 함
+        self.frame = tk.Frame(master, width=default_size[0], height=default_size[1],
+                              bg="red", bd=2, relief="raised")
+        self.show()  # 초기 상태에 항상 표시
+    
+    def show(self):
+        self.frame.place(x=self.x, y=self.y)
+    
+    def hide(self):
+        self.frame.place_forget()
+    
+    def show_feedback(self):
+        # 확장된 크기와 확실한 빨간색을 사용
+        self.frame.config(width=self.expanded_size[0], height=self.expanded_size[1],
+                          bg="#FF0000", bd=2, relief="raised")
+        self.frame.place(x=self.x, y=self.y)
+    
+    def reset_feedback(self):
+        self.frame.config(width=self.default_size[0], height=self.default_size[1],
+                          bg="red", bd=2, relief="raised")
+        self.frame.place(x=self.x, y=self.y)
+    
+    def is_over(self, x_root, y_root):
+        trash_x = self.frame.winfo_rootx()
+        trash_y = self.frame.winfo_rooty()
+        trash_width = self.frame.winfo_width()
+        trash_height = self.frame.winfo_height()
+        return (trash_x <= x_root <= trash_x + trash_width and 
+                trash_y <= y_root <= trash_y + trash_height)
+    
+    def is_near(self, x_root, y_root, threshold=100):
+        trash_cx = self.frame.winfo_rootx() + self.frame.winfo_width() // 2
+        trash_cy = self.frame.winfo_rooty() + self.frame.winfo_height() // 2
+        dx = x_root - trash_cx
+        dy = y_root - trash_cy
+        distance = math.sqrt(dx*dx + dy*dy)
+        return distance < threshold
 
-# =======================
-# 우측 Treeview 및 메모 편집 영역
-# =======================
-treeview_node_map = {}
+# ============================
+# TreeViewPanel: 우측의 트리뷰 및 메모 편집 영역
+# ============================
+class TreeViewPanel(tk.Frame):
+    def __init__(self, master, model, canvas, **kwargs):
+        super().__init__(master, **kwargs)
+        self.model = model
+        self.canvas = canvas
+        self.treeview = ttk.Treeview(self)
+        self.treeview.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.treeview.bind("<<TreeviewSelect>>", self.on_treeview_select)
+        btn_frame = tk.Frame(self)
+        btn_frame.pack(fill=tk.X, padx=5, pady=5)
+        add_node_btn = tk.Button(btn_frame, text="노드 추가", command=self.add_node)
+        add_node_btn.pack(side=tk.LEFT, padx=5)
+        save_memo_btn = tk.Button(btn_frame, text="메모 저장", command=self.save_memo)
+        save_memo_btn.pack(side=tk.LEFT, padx=5)
+        self.memo_text = tk.Text(self, height=10)
+        self.memo_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.treeview_node_map = {}
+        self.refresh()
+    
+    def populate_treeview(self, parent, node):
+        item_id = self.treeview.insert(parent, "end", text=node["name"], open=True)
+        self.treeview_node_map[item_id] = node
+        for child in node.get("children", []):
+            self.populate_treeview(item_id, child)
+    
+    def refresh(self):
+        self.treeview.delete(*self.treeview.get_children())
+        self.treeview_node_map.clear()
+        for node in self.model.tree_data:
+            self.populate_treeview("", node)
+    
+    def on_treeview_select(self, event):
+        selected = self.treeview.selection()
+        if selected:
+            node = self.treeview_node_map.get(selected[0])
+            self.memo_text.delete("1.0", tk.END)
+            self.memo_text.insert(tk.END, node.get("memo", ""))
+        else:
+            self.memo_text.delete("1.0", tk.END)
+    
+    def save_memo(self):
+        selected = self.treeview.selection()
+        if selected:
+            self.model.push_undo()
+            node = self.treeview_node_map.get(selected[0])
+            node["memo"] = self.memo_text.get("1.0", tk.END).strip()
+            self.model.save_tree()
+            messagebox.showinfo("저장", "메모가 저장되었습니다.")
+        else:
+            messagebox.showwarning("선택", "노드를 선택하세요.")
+    
+    def add_node(self):
+        self.model.push_undo()
+        selected = self.treeview.selection()
+        new_name = simpledialog.askstring("노드 추가", "새로운 노드 이름:")
+        if not new_name:
+            return
+        if selected:
+            parent_node = self.treeview_node_map.get(selected[0])
+            parent_node.setdefault("children", []).append({"name": new_name, "memo": "", "children": []})
+        else:
+            self.model.tree_data.append({"name": new_name, "memo": "", "children": []})
+        self.model.save_tree()
+        self.refresh()
+        self.canvas.refresh()
 
-def populate_treeview(tv, parent, node):
-    item_id = tv.insert(parent, "end", text=node["name"], open=True)
-    treeview_node_map[item_id] = node
-    for child in node.get("children", []):
-        populate_treeview(tv, item_id, child)
+    def reset_tree(self):
+        if messagebox.askyesno("초기화", "정말 초기화 하시겠습니까?\n기존 데이터는 모두 삭제됩니다."):
+            self.model.push_undo()
+            self.model.tree_data = [{"name": "루트", "memo": "", "children": []}]
+            self.model.save_tree()
+            self.refresh()
+            self.canvas.refresh()
+            self.memo_text.delete("1.0", tk.END)
+            messagebox.showinfo("초기화", "트리가 초기화되었습니다.")
 
-def refresh_treeview():
-    treeview.delete(*treeview.get_children())
-    treeview_node_map.clear()
-    populate_treeview(treeview, "", tree_data)
+# ============================
+# TreeEditorApp: 메인 애플리케이션 클래스
+# ============================
+class TreeEditorApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("트리 편집기 (패닝, 줌, Trash 피드백)")
+        self.root.geometry("1200x700")
+        
+        # 모델 생성
+        self.model = TreeModel()
+        
+        # 왼쪽: 캔버스 영역
+        left_frame = tk.Frame(root, bg="white")
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # 좌측 상단 버튼: 초기화, Undo, Redo
+        btn_frame_left = tk.Frame(left_frame, bg="white")
+        btn_frame_left.pack(side=tk.TOP, fill=tk.X)
+        reset_btn = tk.Button(btn_frame_left, text="초기화", command=self.reset_tree)
+        reset_btn.pack(side=tk.LEFT, padx=5, pady=5)
+        undo_btn = tk.Button(btn_frame_left, text="Undo", command=self.undo)
+        undo_btn.pack(side=tk.LEFT, padx=5, pady=5)
+        redo_btn = tk.Button(btn_frame_left, text="Redo", command=self.redo)
+        redo_btn.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        # TrashZone 생성 (left_frame 내에 위치)
+        self.trash_zone = TrashZone(left_frame, x=0, y=0)
+        left_frame.bind("<Configure>", self.update_trash_zone_position)
+        
+        # 캔버스 생성 (스크롤바 없이 패닝/줌 사용)
+        self.canvas = TreeCanvas(left_frame, self.model, self.trash_zone, bg="white")
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+        
+        # 오른쪽: TreeView 및 메모 편집 영역
+        right_frame = tk.Frame(root)
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH)
+        self.treeview_panel = TreeViewPanel(right_frame, self.model, self.canvas)
+        self.treeview_panel.pack(fill=tk.BOTH, expand=True)
+        
+        # 초기 그리기
+        self.canvas.refresh()
+        self.treeview_panel.refresh()
+    
+    def update_trash_zone_position(self, event):
+        # TrashZone을 left_frame의 오른쪽 아래에 배치 (여유 공간 10px)
+        x = event.width - self.trash_zone.default_size[0] - 10
+        y = event.height - self.trash_zone.default_size[1] - 10
+        self.trash_zone.x = x
+        self.trash_zone.y = y
+        self.trash_zone.reset_feedback()
+    
+    def reset_tree(self):
+        self.treeview_panel.reset_tree()
+    
+    def undo(self):
+        if self.model.undo():
+            self.canvas.refresh()
+            self.treeview_panel.refresh()
+    
+    def redo(self):
+        if self.model.redo():
+            self.canvas.refresh()
+            self.treeview_panel.refresh()
 
-def on_treeview_select(event):
-    selected = treeview.selection()
-    if selected:
-        node = treeview_node_map.get(selected[0])
-        memo_text.delete("1.0", tk.END)
-        memo_text.insert(tk.END, node.get("memo", ""))
-    else:
-        memo_text.delete("1.0", tk.END)
-
-def save_memo():
-    selected = treeview.selection()
-    if selected:
-        push_undo()
-        node = treeview_node_map.get(selected[0])
-        node["memo"] = memo_text.get("1.0", tk.END).strip()
-        save_tree(tree_data)
-        messagebox.showinfo("저장", "메모가 저장되었습니다.")
-    else:
-        messagebox.showwarning("선택", "노드를 선택하세요.")
-
-def add_node_treeview():
-    selected = treeview.selection()
-    if not selected:
-        messagebox.showwarning("선택", "부모 노드를 선택하세요.")
-        return
-    push_undo()
-    parent_node = treeview_node_map.get(selected[0])
-    new_name = simpledialog.askstring("노드 추가", "새로운 노드 이름:")
-    if new_name:
-        parent_node.setdefault("children", []).append({"name": new_name, "memo": "", "children": []})
-        save_tree(tree_data)
-        refresh_treeview()
-        refresh_canvas()
-
-# =======================
-# 초기화 기능
-# =======================
-def reset_tree():
-    if messagebox.askyesno("초기화", "정말 초기화 하시겠습니까?\n기존 데이터는 모두 삭제됩니다."):
-        global tree_data
-        push_undo()
-        tree_data = {"name": "루트", "memo": "", "children": []}
-        save_tree(tree_data)
-        refresh_treeview()
-        refresh_canvas()
-        memo_text.delete("1.0", tk.END)
-        messagebox.showinfo("초기화", "트리가 초기화되었습니다.")
-
-# =======================
-# 메인 윈도우 및 레이아웃 구성
-# =======================
-root = tk.Tk()
-root.title("트리 편집기 (드래그 앤 드롭 및 화살표 업데이트)")
-root.geometry("1200x700")
-
-# 좌측 프레임: Canvas 시각화 및 상단 버튼들
-left_frame = tk.Frame(root, bg="white")
-left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-btn_frame_left = tk.Frame(left_frame, bg="white")
-btn_frame_left.pack(side=tk.TOP, fill=tk.X)
-reset_btn = tk.Button(btn_frame_left, text="초기화", command=reset_tree)
-reset_btn.pack(side=tk.LEFT, padx=5, pady=5)
-undo_btn = tk.Button(btn_frame_left, text="Undo", command=undo)
-undo_btn.pack(side=tk.LEFT, padx=5, pady=5)
-redo_btn = tk.Button(btn_frame_left, text="Redo", command=redo)
-redo_btn.pack(side=tk.LEFT, padx=5, pady=5)
-
-vis_canvas = tk.Canvas(left_frame, bg="white")
-vis_canvas.pack(fill=tk.BOTH, expand=True)
-vis_canvas.bind("<Configure>", lambda event: refresh_canvas())
-
-# 우측 프레임: Treeview 및 메모 편집 영역
-right_frame = tk.Frame(root)
-right_frame.pack(side=tk.RIGHT, fill=tk.BOTH)
-
-treeview = ttk.Treeview(right_frame)
-treeview.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-treeview.bind("<<TreeviewSelect>>", on_treeview_select)
-
-btn_frame_right = tk.Frame(right_frame)
-btn_frame_right.pack(fill=tk.X, padx=5, pady=5)
-add_node_btn = tk.Button(btn_frame_right, text="노드 추가", command=add_node_treeview)
-add_node_btn.pack(side=tk.LEFT, padx=5)
-save_memo_btn = tk.Button(btn_frame_right, text="메모 저장", command=save_memo)
-save_memo_btn.pack(side=tk.LEFT, padx=5)
-
-memo_text = tk.Text(right_frame, height=10)
-memo_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-refresh_treeview()
-refresh_canvas()
-
-root.mainloop()
+# ============================
+# 메인 실행부
+# ============================
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = TreeEditorApp(root)
+    root.mainloop()
