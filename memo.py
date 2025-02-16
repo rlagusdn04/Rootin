@@ -496,14 +496,8 @@ class TreeCanvas(tk.Canvas):
             else:
                 self.model.save_tree()
         else:
-            new_name = simpledialog.askstring("노드 추가", f"'{self.drag_data['node']['name']}' 노드에 추가할 자식 노드 이름:")
-            if new_name:
-                self.model.push_undo()
-                new_node = {"name": new_name, "memo": "", "children": [], "id": str(self.model.next_id)}
-                self.model.next_id += 1
-                self.drag_data["node"].setdefault("children", []).append(new_node)
-                self.model.save_tree()
-                self.refresh()
+            # 좌클릭일 때 메모 편집 팝업을 실행하도록 변경함
+            self.open_memo_popup(self.drag_data["node"])
         self.drag_data["node"] = None
         self.drag_data["dragging"] = False
         self.trash_zone.reset_feedback()
@@ -518,10 +512,10 @@ class TreeCanvas(tk.Canvas):
             return
         node = self.model.get_node_by_id(self.canvas_node_map[item])
         menu = tk.Menu(self, tearoff=0)
-        menu.add_command(label="메모 편집", command=lambda: self.open_memo_popup(node))
+        # 우클릭 시에는 메모 편집 대신 노드 추가 기능을 포함하도록 변경함
         menu.add_command(label="노드 수정", command=lambda: self.rename_node(node))
         menu.add_command(label="노드 삭제", command=lambda: self.delete_node(node))
-        menu.add_command(label="자식 추가", command=lambda: self.add_child_node(node))
+        menu.add_command(label="노드 추가", command=lambda: self.add_child_node(node))
         menu.add_command(label="추가 부모 연결", command=lambda: self.start_additional_parent(node))
         menu.add_command(label="추가 부모 삭제", command=lambda: self.delete_extra_parent(node))
         menu.post(event.x_root, event.y_root)
